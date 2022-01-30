@@ -2,8 +2,7 @@
 #include <stdlib.h>
 
 #include <iostream>
-#define true 1
-#define false 0
+
 #define TAIL_SEND 0
 #define HEAD_SEND 1
 
