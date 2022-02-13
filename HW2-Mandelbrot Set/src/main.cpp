@@ -1,3 +1,7 @@
+/**
+ * Dynamic任务分配
+ */
+
 #include <mpi.h>
 #include <omp.h>
 
@@ -21,7 +25,7 @@
 int main(int argc, char* argv[]) {
   // get input parameters
   assertm(argc == 9, "Incorrect input number of parameters.");
-  int num_threads = std::atoi(argv[1]);           // 1~12
+  int num_threads_in = std::atoi(argv[1]);           // 1~12
   double left_range_real = std::stod(argv[2]);    // -10~10
   double right_range_real = std::stod(argv[3]);   // -10~10
   double lower_range_image = std::stod(argv[4]);  // -10~10
@@ -33,15 +37,24 @@ int main(int argc, char* argv[]) {
   // Initialize mpi
   int rank, num_processors;
   MPI_Comm custom_world = MPI_COMM_WORLD;
-  // MPI_Group origin_group, new_group;
+  MPI_Group origin_group, new_group;
   MPI_Status status;
 
   MPI_Init(&argc, &argv);
   MPI_Comm_size(MPI_COMM_WORLD, &num_processors);
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 
+  // remove unwanted ranks
   if (num_processors > num_points_x) {
-    // todo
+    MPI_Comm_group(custom_world, &origin_group);
+    int ranges[][3] = {{num_points_x, num_processors - 1, 1}};
+    MPI_Group_range_excl(origin_group, 1, ranges, &new_group);
+    MPI_Comm_create(custom_world, new_group, &custom_world);
+    if (custom_world == MPI_COMM_NULL) {
+      MPI_Finalize();
+      exit(0);
+    }
+    num_processors = num_points_x;
   }
 
   double x_scale = (right_range_real - left_range_real) / num_points_x;
@@ -51,12 +64,18 @@ int main(int argc, char* argv[]) {
     // 单核情况
     std::vector<std::vector<int>> mand_set(num_points_x,
                                            std::vector<int>(num_points_y, 0));
-    for (int j = 0; j < num_points_y; j++) {
-      for (int i = 0; i < num_points_x; i++) {
-        // from left to right and top to bottom
-        double r = left_range_real + i * x_scale;
-        double im = lower_range_image + j * y_scale;
-        mand_set[i][j] = calPixel(Complex(r, im));
+    // Open MP并发
+    int i, j;
+    #pragma omp parallel num_threads(num_threads_in) private(i, j)
+    {
+      #pragma omp parallel for schedule(dynamic, 10)
+      for (j = 0; j < num_points_y; j++) {
+        for (i = 0; i < num_points_x; i++) {
+          // from left to right and top to bottom
+          double r = left_range_real + i * x_scale;
+          double im = lower_range_image + j * y_scale;
+          mand_set[i][j] = calPixel(Complex(r, im));
+        }
       }
     }
     twoDVecToFile(mand_set, output_filename);
@@ -113,12 +132,17 @@ int main(int argc, char* argv[]) {
         if (status.MPI_TAG == MPI_TAG_TERMINATE) {
           break;
         }
-        // 执行任务
+        // Open MP并发执行任务
         double r = left_range_real + task_pos_get * x_scale;
         local_buf[0] = task_pos_get;
-        for (int j = 0; j < num_points_y; j++) {
-          double im = lower_range_image + j * y_scale;
-          local_buf[j + 1] = calPixel(Complex(r, im));
+        int j;
+        #pragma omp parallel num_threads(num_threads_in) private(j)
+        {
+          #pragma omp parallel for schedule(dynamic, 10)
+          for (j = 0; j < num_points_y; j++) {
+            double im = lower_range_image + j * y_scale;
+            local_buf[j + 1] = calPixel(Complex(r, im));
+          }
         }
         // 发送任务结果
         MPI_Send(local_buf, num_points_y + 1, MPI_INT, 0, MPI_TAG_COMPLETE,
